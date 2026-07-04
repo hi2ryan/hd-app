@@ -1,0 +1,16 @@
+{
+	"name": "hd-app",
+	"emitLegacyScripts": false,
+	"tree": {
+		"$className": "DataModel",
+
+		"ReplicatedStorage": {
+			"client": {
+				"$path": "src/client"
+			},
+			"packages": {
+				"$path": "packages"
+			}
+		}
+	}
+}
