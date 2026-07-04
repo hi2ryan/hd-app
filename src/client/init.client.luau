@@ -146,6 +146,7 @@ do
 	highlight.FillTransparency = 1
 	highlight.OutlineColor = Color3.new(1, 1, 1)
 	highlight.Parent = CONTAINER
+	CONTAINER.Parent = workspace
 
 	--- Creates a "human" entity along with its rootpart.
 	const function human_create(origin: vector, name: string): Entity
