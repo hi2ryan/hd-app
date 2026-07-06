@@ -15,10 +15,15 @@ type Entity<T = nil> = jecs.Entity<T>
 
 type SystemFn<T... = ...unknown> = (T...) -> ()
 type SystemEntry = { fn: SystemFn, priority: number }
+
+--- A system scheduler.
 type Scheduler = {
 	_systems: { [RBXScriptSignal]: { SystemEntry } },
 
-	schedule: <T...>(self: Scheduler, signal: RBXScriptSignal, SystemFn<T...>, priority: number) -> (),
+	--- Schedules a system to run according to a signal and with a designated priority.
+	schedule: <T...>(self: Scheduler, signal: RBXScriptSignal<T...>, SystemFn<T...>, priority: number) -> (),
+
+	--- Runs all scheduled systems according to their signals and priorities.
 	run: (self: Scheduler) -> (),
 }
 
@@ -139,9 +144,10 @@ end
 --- Creates an entity of a species with parameters for its name and origin.
 local prefab: (species: Entity, name: string, origin: vector) -> Entity
 do
-	-- create a white outlined highlight around the parts
+	-- for creating a white outlined highlight around the parts
 	-- use a container model so it can support all the parts instead of the highlight limit
 	const CONTAINER = Instance.new("Model")
+	CONTAINER.Name = "highlight_container"
 	const highlight = Instance.new("Highlight")
 	highlight.Adornee = CONTAINER
 	highlight.FillTransparency = 1
@@ -156,7 +162,7 @@ do
 
 		-- create part
 		const root_part = Instance.new("Part")
-		root_part.Name = `{species_name}-{name}`
+		root_part.Name = `{species_name}_{name}`
 		root_part.CFrame = CFrame.new(origin :: any) -- position at origin
 		root_part.Anchored = true
 		root_part.Shape = Enum.PartType.Wedge
@@ -237,13 +243,11 @@ const function apply_velocity(dt: number)
 			const direction = velocity * dt
 			local new_position = prev_position + direction
 
-			const dir_n = vector.normalize(direction)
-
 			-- all axes are the same for the current parts so we can just use y
 			const half_size = size.y * 0.5
 
-			-- convert scalar half size into vector size in direction of entity direction
-			const vec_half_size = dir_n * half_size
+			-- convert scalar half size into vector in the entity's direction
+			const vec_half_size = vector.normalize(direction) * half_size
 
 			-- raycast from center to half of its size in the direction + the velocity direction
 			const origin = prev_position
@@ -252,6 +256,7 @@ const function apply_velocity(dt: number)
 			-- exclude this part from its own collision check raycast
 			collision_params.ExcludeInstances = { root_part }
 
+			-- raycast to detect collisions
 			const raycast_result = workspace:Raycast(origin :: any, ray_dir :: any, collision_params)
 			if raycast_result then
 				-- collision detected
@@ -260,14 +265,16 @@ const function apply_velocity(dt: number)
 				const hit_pos: vector = raycast_result.Position :: any
 				const normal: vector = raycast_result.Normal :: any
 
-				-- calc. dot product
+				-- calculate the velocity that went into the surface normal (dot product)
 				const dot = vector.dot(velocity, normal)
 
-				-- reflect dot for bounce
+				-- reflect velocity by surface normal
 				const bounce = velocity - (2 * dot) * normal
+
+				-- reduce bounce velocity (damp) so it eventually stops
 				local new_velocity = bounce * BOUNCE_DAMPING_RATIO
 
-				-- update position to be above the hit surface
+				-- set position to be above the hit surface
 				new_position = hit_pos + normal * half_size
 
 				if vector.magnitude(new_velocity) < MIN_BOUNCE then
@@ -329,7 +336,7 @@ const RANDOMNESS_STRENGTH = 5 -- how strong to apply random offset (multiplier)
 
 const RANDOM = Random.new()
 
--- start spawning humans and aleins starting at ORIGIN_HEIGHT height and going up by `DISPLACEMENT`
+-- start spawning humans and aleins starting at ORIGIN_HEIGHT height and going up by DISPLACEMENT
 local position = vector.create(0, ORIGIN_HEIGHT, 0)
 while true do
 	-- add random offset
@@ -337,7 +344,6 @@ while true do
 	position += DISPLACEMENT + offset
 
 	-- spawn human
-	-- prefabs.human(position, "billbert")
 	prefab(Human, "billbert", position)
 	task.wait(1.5)
 
