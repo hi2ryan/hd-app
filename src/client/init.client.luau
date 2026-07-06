@@ -22,11 +22,6 @@ type Scheduler = {
 	run: (self: Scheduler) -> (),
 }
 
-type Prefabs = {
-	human: (origin: vector, name: string) -> Entity,
-	alien: (origin: vector, name: string) -> Entity,
-}
-
 -- create ecs world
 const world = jecs.world()
 
@@ -57,21 +52,27 @@ const Species = world:entity()
 const Human = world:entity()
 const Alien = world:entity()
 
---- The default health for a human entity
-const HUMAN_SIZE = vector.create(2.5, 2.5, 2.5)
+-- Species-Size map
+const SPECIES_SIZE: { [Entity]: vector } = {
+	[Human] = vector.one * 2.5, -- human size: (2.5, 2.5, 2.5)
+	[Alien] = vector.one * 5    -- alien size: (5, 5, 5)
+}
 
---- The default health for an alien entity
-const ALIEN_SIZE = HUMAN_SIZE * 2
+--- Species-Color map
+const SPECIES_COLOR: { [Entity]: Color3 } = {
+	[Human] = Color3.fromRGB(232, 224, 140),
+	[Alien] = Color3.fromRGB(78, 220, 88),
+}
 
 -- physics constants
-const MIN_BOUNCE = 0.5
-const BOUNCE_DAMPING_RATIO = 0.6
+const MIN_BOUNCE = 0.5 -- when the velocity magnitude is below this threshold, stops bouncing
+const BOUNCE_DAMPING_RATIO = 0.6 -- bounce velocity damping multiplier
 
 -- species acceleration map
 const GRAVITATIONAL_ACCELERATION: { [Entity]: vector } = {
 	[Human] = vector.create(0, -100, 0),
 
-	-- for some reason aliens are not affected as much by gravity
+	-- Aliens are not affected as much by gravity
 	[Alien] = vector.create(0, -25, 0),
 }
 
@@ -135,8 +136,8 @@ function scheduler.run(self: Scheduler)
 	end
 end
 
--- prefabs for ecs entity creation
-local prefabs: Prefabs
+--- Creates an entity of a species with parameters for its name and origin.
+local prefab: (species: Entity, name: string, origin: vector) -> Entity
 do
 	-- create a white outlined highlight around the parts
 	-- use a container model so it can support all the parts instead of the highlight limit
@@ -148,59 +149,44 @@ do
 	highlight.Parent = CONTAINER
 	CONTAINER.Parent = workspace
 
-	--- Creates a "human" entity along with its rootpart.
-	const function human_create(origin: vector, name: string): Entity
+	--- Creates a species' root part by its name, origin, size, color, and species.
+	const function create_root_part(name: string, origin: vector, size: vector, color: Color3, species: Entity): Part
+		-- get string name from species entity
+		const species_name = if species == Human then "human" else "alien"
+
 		-- create part
 		const root_part = Instance.new("Part")
-		root_part.Name = `human-{name}`
-		root_part.CFrame = CFrame.new(origin :: any)
-		root_part.Anchored = true
-		root_part.Size = HUMAN_SIZE :: any
-		root_part.Color = Color3.fromRGB(232, 224, 140)
-		root_part.Parent = CONTAINER
-
-		-- create ecs entity for the "human"
-		const entity = world:entity()
-		world:set(entity, Transform, CFrame.new(origin :: any))
-		world:set(entity, Position, origin)
-		world:set(entity, Velocity, vector.zero)
-		world:set(entity, Size, HUMAN_SIZE)
-		world:set(entity, RootPart, root_part)
-		world:add(entity, Gravity)
-		world:add(entity, pair(Species, Human))
-
-		return entity
-	end
-
-	--- Creates an "alien" entity along with its rootpart.
-	const function alien_create(origin: vector, name: string): Entity
-		-- create part
-		const root_part = Instance.new("Part")
-		root_part.Name = `alien-{name}`
-		root_part.CFrame = CFrame.new(origin :: any)
+		root_part.Name = `{species_name}-{name}`
+		root_part.CFrame = CFrame.new(origin :: any) -- position at origin
 		root_part.Anchored = true
 		root_part.Shape = Enum.PartType.Wedge
-		root_part.Size = ALIEN_SIZE :: any -- alien bigger than human
-		root_part.Color = Color3.fromRGB(78, 220, 88)
+		root_part.Size = size :: any
+		root_part.Color = color
 		root_part.Parent = CONTAINER
 
-		-- create ecs entity for the "alien"
+		return root_part
+	end
+
+	prefab = function(species: Entity, name: string, origin: vector): Entity
+		-- get species size & color by predefined constants map
+		const size = SPECIES_SIZE[species]
+		const color = SPECIES_COLOR[species]
+
+		-- create root part
+		const root_part = create_root_part(name, origin, size, color, species)
+
+		-- create entity and assign components
 		const entity = world:entity()
 		world:set(entity, Transform, CFrame.new(origin :: any))
 		world:set(entity, Position, origin)
 		world:set(entity, Velocity, vector.zero)
-		world:set(entity, Size, ALIEN_SIZE)
+		world:set(entity, Size, size)
 		world:set(entity, RootPart, root_part)
 		world:add(entity, Gravity)
-		world:add(entity, pair(Species, Alien))
+		world:add(entity, pair(Species, species))
 
 		return entity
 	end
-
-	prefabs = {
-		human = human_create,
-		alien = alien_create,
-	}
 end
 
 --- Applies gravitational acceleration to every entity with the following components:
@@ -253,9 +239,6 @@ const function apply_velocity(dt: number)
 
 			const dir_n = vector.normalize(direction)
 
-			-- raycast for collision detection
-			collision_params.ExcludeInstances = { root_part }
-
 			-- all axes are the same for the current parts so we can just use y
 			const half_size = size.y * 0.5
 
@@ -266,7 +249,7 @@ const function apply_velocity(dt: number)
 			const origin = prev_position
 			const ray_dir = direction + vec_half_size
 
-			-- exclude this part from its own raycast collisions
+			-- exclude this part from its own collision check raycast
 			collision_params.ExcludeInstances = { root_part }
 
 			const raycast_result = workspace:Raycast(origin :: any, ray_dir :: any, collision_params)
@@ -327,6 +310,7 @@ const function update_transforms(_dt: number)
 end
 
 -- register systems
+-- ordering: apply gravity -> apply velocity -> update transforms
 scheduler:schedule(RunService.Heartbeat, apply_gravity, 3)
 scheduler:schedule(RunService.Heartbeat, apply_velocity, 2)
 scheduler:schedule(RunService.Heartbeat, update_transforms, 1)
@@ -334,28 +318,30 @@ scheduler:schedule(RunService.Heartbeat, update_transforms, 1)
 -- start running systems
 scheduler:run()
 
--- wait
+-- wait for player to load and stuff
 task.wait(3.5)
 print("starting")
 
 -- constants for spawning
-const ORIGIN_HEIGHT = 25
-const DISPLACEMENT = vector.create(0, 10, 0)
-const RANDOMNESS_FACTOR = 5
+const ORIGIN_HEIGHT = 25 -- initial height
+const DISPLACEMENT = vector.create(0, 10, 0) -- each iteration adds this
+const RANDOMNESS_STRENGTH = 5 -- how strong to apply random offset (multiplier)
 
 const RANDOM = Random.new()
 
--- create human/alien tower starting at ORIGIN_HEIGHT height and going up by HEIGHT_DISP
+-- start spawning humans and aleins starting at ORIGIN_HEIGHT height and going up by `DISPLACEMENT`
 local position = vector.create(0, ORIGIN_HEIGHT, 0)
 while true do
-	local offset: vector = RANDOM:NextUnitVector() * RANDOMNESS_FACTOR :: any
+	-- add random offset
+	local offset: vector = RANDOM:NextUnitVector() * RANDOMNESS_STRENGTH :: any
 	position += DISPLACEMENT + offset
 
 	-- spawn human
-	prefabs.human(position, "billbert")
+	-- prefabs.human(position, "billbert")
+	prefab(Human, "billbert", position)
 	task.wait(1.5)
 
 	-- spawn alien
-	prefabs.alien(position - offset, "steven")
+	prefab(Alien, "steven", position - offset)
 	task.wait(1.5)
 end
