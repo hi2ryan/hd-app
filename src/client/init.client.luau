@@ -45,6 +45,9 @@ const Size = world:component<<vector>>()
 --- Defines the root BasePart of an entity.
 const RootPart = world:component<<BasePart>>()
 
+--- Determines when an entity should despawn
+const DespawnsAt = world:component<<number>>()
+
 -- ECS tags
 
 --- Determines whether an entity is affected by gravitational acceleration
@@ -69,6 +72,12 @@ const SPECIES_COLOR: { [Entity]: Color3 } = {
 	[Alien] = Color3.fromRGB(78, 220, 88),
 }
 
+--- Species-Lifetime(seconds) map
+const SPECIES_LIFETIME: { [Entity]: number } = {
+	[Human] = 10,
+	[Alien] = 25,
+}
+
 -- physics constants
 const MIN_BOUNCE = 0.5 -- when the velocity magnitude is below this threshold, stops bouncing
 const BOUNCE_DAMPING_RATIO = 0.6 -- bounce velocity damping multiplier
@@ -82,6 +91,7 @@ const GRAVITATIONAL_ACCELERATION: { [Entity]: vector } = {
 }
 
 -- create cached ecs queries
+const q_despawns = world:query(DespawnsAt):cached()
 const q_gravity = world:query(Velocity, Gravity, pair(Species, Wildcard)):cached()
 const q_movement = world:query(
     Position,
@@ -177,6 +187,7 @@ do
 		-- get species size & color by predefined constants map
 		const size = SPECIES_SIZE[species]
 		const color = SPECIES_COLOR[species]
+		const lifetime = SPECIES_LIFETIME[species]
 
 		-- create root part
 		const root_part = create_root_part(name, origin, size, color, species)
@@ -188,11 +199,42 @@ do
 		world:set(entity, Velocity, vector.zero)
 		world:set(entity, Size, size)
 		world:set(entity, RootPart, root_part)
+		world:set(entity, DespawnsAt, os.clock() + lifetime) -- set despawn time to be now + lifetime
 		world:add(entity, Gravity)
 		world:add(entity, pair(Species, species))
 
 		return entity
 	end
+end
+
+--- Despawns entities based on their species' lifetime.
+const function entities_despawn(dt: number)
+	debug.profilebegin("entities_despawn")
+
+	-- cache os.clock call to prevent constantly calling it for comparison
+	const now = os.clock()
+
+	for _, archetype in q_despawns:archetypes() do
+		const columns = archetype.columns_map
+		const entities = archetype.entities
+
+		-- get DespawnsAt column
+		const despawn_times: { number } = columns[DespawnsAt]
+
+		-- iterate backwards to prevent iterator invalidation
+		for row = #entities, 1, -1 do
+			const entity = entities[row]
+
+			-- check if we are past their despawn time
+			const despawns_at = despawn_times[row]
+			if now > despawns_at then
+				-- they should despawn now, delete entity
+				world:delete(entity)
+			end
+		end
+	end
+
+	debug.profileend()
 end
 
 --- Applies gravitational acceleration to every entity with the following components:
@@ -317,10 +359,27 @@ const function update_transforms(_dt: number)
 end
 
 -- register systems
--- ordering: apply gravity -> apply velocity -> update transforms
+-- ordering: despawn entities -> apply gravity -> apply velocity -> update transforms
+-- we despawn entities first to prevent running through all other physics systems for a dead, stale entity
+scheduler:schedule(RunService.Heartbeat, entities_despawn, 4)
 scheduler:schedule(RunService.Heartbeat, apply_gravity, 3)
 scheduler:schedule(RunService.Heartbeat, apply_velocity, 2)
 scheduler:schedule(RunService.Heartbeat, update_transforms, 1)
+
+-- add hook to destroy RootPart after an entity with the component is deleted
+world:removed(RootPart, function(e: Entity, id: jecs.Id, delete: boolean?)
+	if not delete then
+		-- entity was not deleted
+		-- in this case this will never happen because we do not call world:remove(e, RootPart)
+		return
+	end
+
+	-- destroy rootpart instance
+	const root_part = world:get(e, RootPart)
+	if root_part then
+		root_part:Destroy()
+	end
+end)
 
 -- start running systems
 scheduler:run()
