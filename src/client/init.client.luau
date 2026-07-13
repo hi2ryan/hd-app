@@ -6,8 +6,12 @@ Connected Discord-GitHub
 @hii2ryan on roblox
 ]]
 
+const ContentProvider = game:GetService("ContentProvider")
+const PhysicsService = game:GetService("PhysicsService")
+const Players = game:GetService("Players")
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const RunService = game:GetService("RunService")
+const TweenService = game:GetService("TweenService")
 
 const jecs = require(ReplicatedStorage.packages.jecs)
 
@@ -48,6 +52,12 @@ const RootPart = world:component<<BasePart>>()
 --- Determines when an entity should despawn
 const DespawnsAt = world:component<<number>>()
 
+--- The TextLabel of an entity's BillboardGui which shows the bounce counter.
+const BounceLabel = world:component<<TextLabel>>()
+
+--- Represents how many times an entity has bounced.
+const BounceCount = world:component<<number>>()
+
 -- ECS tags
 
 --- Determines whether an entity is affected by gravitational acceleration
@@ -79,8 +89,11 @@ const SPECIES_LIFETIME: { [Entity]: number } = {
 }
 
 -- physics constants
-const MIN_BOUNCE = 0.5 -- when the velocity magnitude is below this threshold, stops bouncing
+const MIN_BOUNCE = 2 -- when the velocity magnitude is below this threshold, stops bouncing
 const BOUNCE_DAMPING_RATIO = 0.6 -- bounce velocity damping multiplier
+
+--- The height at which entities will be deleted and their models will be destroyed.
+const DESTROY_HEIGHT = -500
 
 -- species acceleration map
 const GRAVITATIONAL_ACCELERATION: { [Entity]: vector } = {
@@ -90,6 +103,11 @@ const GRAVITATIONAL_ACCELERATION: { [Entity]: vector } = {
 	[Alien] = vector.create(0, -25, 0),
 }
 
+--- The bounce SFX that will be used when an entity bounces off a surface.
+const BOUNCE_SOUND = Instance.new("Sound")
+BOUNCE_SOUND.Name = "bounce"
+BOUNCE_SOUND.SoundId = "rbxassetid://96931068976144"
+
 -- create cached ecs queries
 const q_despawns = world:query(DespawnsAt):cached()
 const q_gravity = world:query(Velocity, Gravity, pair(Species, Wildcard)):cached()
@@ -98,8 +116,11 @@ const q_movement = world:query(
     Velocity,
     Transform,
     RootPart,
-    Size
+    Size,
+	BounceCount,
+	BounceLabel
 ):cached()
+const q_positions = world:query(Position):cached()
 const q_transforms = world:query(RootPart, Transform):cached()
 
 -- create raycast params that will be reused throughout apply_velocity
@@ -151,6 +172,25 @@ function scheduler.run(self: Scheduler)
 	end
 end
 
+--- Plays the `BOUNCE_SOUND` at `position`.
+const function play_bounce_sound(position: vector)
+	-- create an attachment at the position
+	const attachment = Instance.new("Attachment")
+	attachment.WorldPosition = position :: any
+
+	-- place bounce sound under the attachment to make the sound emit from position
+	const sound = BOUNCE_SOUND:Clone()
+	sound.Parent = attachment
+
+	attachment.Parent = workspace
+
+	-- play the sound and destroy the attachment when it ends
+	sound:Play()
+	sound.Ended:Once(function()
+		attachment:Destroy()
+	end)
+end
+
 --- Creates an entity of a species with parameters for its name and origin.
 local prefab: (species: Entity, name: string, origin: vector) -> Entity
 do
@@ -166,7 +206,7 @@ do
 	CONTAINER.Parent = workspace
 
 	--- Creates a species' root part by its name, origin, size, color, and species.
-	const function create_root_part(name: string, origin: vector, size: vector, color: Color3, species: Entity): Part
+	const function create_root_part(name: string, origin: vector, color: Color3, species: Entity): Part
 		-- get string name from species entity
 		const species_name = if species == Human then "human" else "alien"
 
@@ -176,11 +216,88 @@ do
 		root_part.CFrame = CFrame.new(origin :: any) -- position at origin
 		root_part.Anchored = true
 		root_part.Shape = Enum.PartType.Wedge
-		root_part.Size = size :: any
 		root_part.Color = color
 		root_part.Parent = CONTAINER
 
 		return root_part
+	end
+
+	const PRE_TWEEN_SIZE = vector.one * 0.05
+
+	--- Tweens the `root_part`'s size from (essentially) zero. This is purely cosmetic as the
+	--- Size component is not modified.
+	const function play_spawn_tween(root_part: BasePart, target_size: vector)
+		root_part.Size = PRE_TWEEN_SIZE :: any
+
+		const tween = TweenService:Create(
+			root_part,
+			TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{ Size = target_size :: any }
+		)
+		tween:Play()
+	end
+
+	--- Creates the bounce counter BillboardGui for an entity.
+	--- Returns the BillboardGui and bounce counter label.
+	const function create_billboard(offset: number): (BillboardGui, TextLabel)
+		-- create BillboardGui
+		const billboard_gui = Instance.new("BillboardGui")
+		billboard_gui.LightInfluence = 0
+		billboard_gui.AlwaysOnTop = true
+		billboard_gui.Size = UDim2.fromScale(2.5, 1)
+		billboard_gui.StudsOffset = Vector3.new(0, offset, 0)
+		billboard_gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+		-- create "Bounces" title label which will be below bounce count and slightly transparent
+		const title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.FontFace = Font.new(
+			"rbxassetid://12187372847",
+			Enum.FontWeight.SemiBold,
+			Enum.FontStyle.Normal
+		) -- Barlow semibold
+		title.Position = UDim2.fromScale(0, 0.6)
+		title.Size = UDim2.fromScale(1, 0.4)
+		title.Text = "Bounces"
+		title.TextColor3 = Color3.new(1, 1, 1)
+		title.TextScaled = true
+		title.TextTransparency = 0.25
+
+		-- create yellow to orange gradient
+		const gradient = Instance.new("UIGradient")
+		gradient.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 217, 0)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 113, 65)),
+		})
+		gradient.Rotation = 90
+		gradient.Parent = title
+
+		local stroke = Instance.new("UIStroke")
+		stroke.StrokeSizingMode = Enum.StrokeSizingMode.ScaledSize
+		stroke.Thickness = 0.05
+		stroke.Transparency = 0.5
+		stroke.Parent = title
+
+		title.Parent = billboard_gui
+
+		-- create bounce count label
+		const bounces = Instance.new("TextLabel")
+		bounces.BackgroundTransparency = 1
+		bounces.FontFace = Font.new(
+			"rbxassetid://12187372847",
+			Enum.FontWeight.ExtraBold,
+			Enum.FontStyle.Normal
+		) -- Barlow extra bold
+		bounces.Position = UDim2.fromScale(0, 0.1)
+		bounces.Size = UDim2.fromScale(1, 0.6)
+		bounces.Text = "0"
+		bounces.TextColor3 = Color3.new(1, 1, 1)
+		bounces.TextScaled = true
+		gradient:Clone().Parent = bounces
+		stroke:Clone().Parent = bounces
+		bounces.Parent = billboard_gui
+
+		return billboard_gui, bounces
 	end
 
 	prefab = function(species: Entity, name: string, origin: vector): Entity
@@ -190,18 +307,48 @@ do
 		const lifetime = SPECIES_LIFETIME[species]
 
 		-- create root part
-		const root_part = create_root_part(name, origin, size, color, species)
+		const root_part = create_root_part(name, origin, color, species)
+
+		-- create bounce count billboard
+		const offset = if species == Human then 2 else 3
+		const billboard, bounce_label = create_billboard(offset)
+		billboard.Parent = root_part
 
 		-- create entity and assign components
 		const entity = world:entity()
+
+		-- set the entity's initial CFrame (Transform) to be origin
 		world:set(entity, Transform, CFrame.new(origin :: any))
+
+		-- set the entity's initial position to origin
 		world:set(entity, Position, origin)
+
+		-- zero the entity's velocity
 		world:set(entity, Velocity, vector.zero)
+
+		-- set the entity's size
 		world:set(entity, Size, size)
+
+		-- assign the entity's rootpart
 		world:set(entity, RootPart, root_part)
-		world:set(entity, DespawnsAt, os.clock() + lifetime) -- set despawn time to be now + lifetime
+
+		-- set the entity to despawn at to now + lifetime
+		world:set(entity, DespawnsAt, os.clock() + lifetime)
+
+		-- initialize entity bounce count to 0
+		world:set(entity, BounceCount, 0)
+
+		-- assign bounce count TextLabel to entity
+		world:set(entity, BounceLabel, bounce_label)
+
+		-- add the Gravity tag to the entity to apply gravitational acceleration
 		world:add(entity, Gravity)
+
+		-- add the species pair to the entity
 		world:add(entity, pair(Species, species))
+
+		-- play spawn tween
+		play_spawn_tween(root_part, size)
 
 		return entity
 	end
@@ -221,7 +368,7 @@ const function entities_despawn(dt: number)
 		-- get DespawnsAt column
 		const despawn_times: { number } = columns[DespawnsAt]
 
-		-- iterate backwards to prevent iterator invalidation
+		-- iterate backwards to prevent iterator invalidation when an entity is deleted
 		for row = #entities, 1, -1 do
 			const entity = entities[row]
 
@@ -267,12 +414,14 @@ const function apply_velocity(dt: number)
 	for _, archetype in q_movement:archetypes() do
 		const columns = archetype.columns_map
 
-		-- get Transform, Position, Velocity, RootPart, and Size columns
+		-- get Transform, Position, Velocity, RootPart, Size, BounceCount, and BounceLabel columns
 		const transforms: { CFrame } = columns[Transform]
 		const positions: { vector } = columns[Position]
 		const velocities: { vector } = columns[Velocity]
 		const root_parts: { BasePart } = columns[RootPart]
 		const sizes: { vector } = columns[Size]
+		const bounce_counts: { number } = columns[BounceCount]
+		const bounce_labels: { TextLabel } = columns[BounceLabel]
 
 		for row, entity in archetype.entities do
 			-- retrieve position, velocity, root part, size, and transform row values
@@ -322,6 +471,21 @@ const function apply_velocity(dt: number)
 				if vector.magnitude(new_velocity) < MIN_BOUNCE then
 					-- stop to prevent jittering and weird movement
 					new_velocity = vector.zero
+				else
+					-- add 1 to bounce count
+					const prev_bounce_count = bounce_counts[row]
+					const bounce_label = bounce_labels[row]
+
+					const bounce_count = prev_bounce_count + 1
+
+					-- update bounce count
+					bounce_counts[row] = bounce_count
+
+					-- update bounce count display
+					bounce_label.Text = tostring(bounce_count)
+
+					-- play bounce sound at the hit position
+					play_bounce_sound(hit_pos)
 				end
 
 				-- update velocity
@@ -333,6 +497,37 @@ const function apply_velocity(dt: number)
 			-- update position and transform
 			positions[row] = new_position
 			transforms[row] = new_transform
+		end
+	end
+
+	debug.profileend()
+end
+
+--- System that deletes all entities under `DESTROY_HEIGHT`
+const function respect_bounds(dt: number)
+	debug.profilebegin("respect_bounds")
+
+	-- iterate all archetypes of q_positions query (Position)
+	for _, archetype in q_positions:archetypes() do
+		const columns = archetype.columns_map
+		const entities = archetype.entities
+
+		-- retrieve positions column
+		const positions: { vector } = columns[Position]
+
+		-- iterate backwards to prevent iterator invalidation when an entity is deleted
+		for row = #entities, 1, -1 do
+			const entity = entities[row]
+
+			-- retrieve entity position
+			const position = positions[row]
+
+			-- check if the entity's y position is below the destroy height
+			if position.y < DESTROY_HEIGHT then
+				-- too far down, delete entity
+				-- this will, in turn, delete the RootPart due to the removed hook
+				world:delete(entity)
+			end
 		end
 	end
 
@@ -359,11 +554,12 @@ const function update_transforms(_dt: number)
 end
 
 -- register systems
--- ordering: despawn entities -> apply gravity -> apply velocity -> update transforms
+-- ordering: despawn entities -> apply gravity -> apply velocity -> destroy entities out of bounds -> update transforms
 -- we despawn entities first to prevent running through all other physics systems for a dead, stale entity
-scheduler:schedule(RunService.Heartbeat, entities_despawn, 4)
-scheduler:schedule(RunService.Heartbeat, apply_gravity, 3)
-scheduler:schedule(RunService.Heartbeat, apply_velocity, 2)
+scheduler:schedule(RunService.Heartbeat, entities_despawn, 5)
+scheduler:schedule(RunService.Heartbeat, apply_gravity, 4)
+scheduler:schedule(RunService.Heartbeat, apply_velocity, 3)
+scheduler:schedule(RunService.Heartbeat, respect_bounds, 2)
 scheduler:schedule(RunService.Heartbeat, update_transforms, 1)
 
 -- add hook to destroy RootPart after an entity with the component is deleted
@@ -379,6 +575,11 @@ world:removed(RootPart, function(e: Entity, id: jecs.Id, delete: boolean?)
 	if root_part then
 		root_part:Destroy()
 	end
+end)
+
+task.spawn(function()
+	-- preload bounce sound
+	ContentProvider:PreloadAsync({BOUNCE_SOUND})
 end)
 
 -- start running systems
